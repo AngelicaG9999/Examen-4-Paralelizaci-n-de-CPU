@@ -4,6 +4,8 @@ import javax.swing.*;
 
 import java.awt.*;
 import java.awt.event.ActionListener;
+import java.awt.event.WindowAdapter;
+import java.awt.event.WindowEvent;
 import java.awt.image.BufferedImage;
 import java.io.File;
 
@@ -27,7 +29,7 @@ public class VistaReproductor extends JFrame {
     private void configurarVentana() {
         setTitle("Laboratorio MVC: Gestión de Recursos en Reproducción MP4");
         setSize(1100, 650);
-        setDefaultCloseOperation(JFrame.EXIT_ON_CLOSE);
+        setDefaultCloseOperation(JFrame.DO_NOTHING_ON_CLOSE);
         setLayout(new BorderLayout());
 
         add(panelVideo, BorderLayout.CENTER);
@@ -59,7 +61,7 @@ public class VistaReproductor extends JFrame {
     }
 
     public void actualizarImagenVideo(BufferedImage imagen) {
-        panelVideo.actualizarImagen(imagen);
+        enInterfaz(() -> panelVideo.actualizarImagen(imagen));
     }
 
    public void setSelecionarClick(ActionListener escuchadorEventos){
@@ -74,12 +76,28 @@ public class VistaReproductor extends JFrame {
     }
 	
 	public void actualizarTelemetria(ServicioDecodificador.Metricas metricas){
+        enInterfaz(() -> {
 		lblHeapMem.setText(String.format("Heap JVM:          %d MB", metricas.memoriaHeapMB()));
 		lblOffHeapMem.setText(String.format("Off-Heap / Nativa: %d MB", metricas.memoriaOffHeapMB()));
 		lblCpuUso.setText(String.format("Uso CPU Global:    %.1f %%", metricas.porcentajeUsoCPU()));
 		lblTiempoLectura.setText(String.format("Lectura I/O:       %d ms", metricas.tiempoLectura()));
 		lblBufferEstado.setText(String.format("Estado Búfer:      %d / %d", metricas.ocupacionCola(), ServicioDecodificador.TAMAÑO_MAXIMO_COLA));
         pbBuffer.setValue(metricas.ocupacionCola());
+        });
 	}
 
+    public void setReproduciendo(boolean reproduciendo) {
+        enInterfaz(() -> btnSeleccionar.setEnabled(!reproduciendo));
+    }
+
+    public void setCerrar(Runnable cerrar) {
+        addWindowListener(new WindowAdapter() {
+            @Override public void windowClosing(WindowEvent evento) { cerrar.run(); }
+        });
+    }
+
+    private void enInterfaz(Runnable tarea) {
+        if (SwingUtilities.isEventDispatchThread()) tarea.run();
+        else SwingUtilities.invokeLater(tarea);
+    }
 }

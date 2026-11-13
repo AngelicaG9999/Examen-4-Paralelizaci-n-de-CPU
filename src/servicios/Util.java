@@ -1,181 +1,102 @@
 package servicios;
 
-import java.nio.Buffer;
-import java.nio.FloatBuffer;
-import java.util.LinkedList;
-import java.util.Queue;
+import java.nio.*;
 
-public class Util {
+public final class Util {
+    private Util() {}
 
-    // Método para duplicar de forma segura cualquier tipo de Buffer de JavaCV
+    // Copia independiente sin modificar posicion, limite ni marca del original.
     public static Buffer duplicarBuffer(Buffer original) {
-        if (original instanceof java.nio.FloatBuffer) {
-            java.nio.FloatBuffer fb = (java.nio.FloatBuffer) original;
-            java.nio.FloatBuffer clone = java.nio.FloatBuffer.allocate(fb.capacity());
-            fb.mark();
-            clone.put(fb);
-            fb.reset();
-            clone.flip();
-            return clone;
-        } else if (original instanceof java.nio.ShortBuffer) {
-            java.nio.ShortBuffer sb = (java.nio.ShortBuffer) original;
-            java.nio.ShortBuffer clone = java.nio.ShortBuffer.allocate(sb.capacity());
-            sb.mark();
-            clone.put(sb);
-            sb.reset();
-            clone.flip();
-            return clone;
-        } else if (original instanceof java.nio.ByteBuffer) {
-            java.nio.ByteBuffer bb = (java.nio.ByteBuffer) original;
-            java.nio.ByteBuffer clone = java.nio.ByteBuffer.allocate(bb.capacity());
-            bb.mark();
-            clone.put(bb);
-            bb.reset();
-            clone.flip();
-            return clone;
-        }
-        return original; // Fallback si fuera otro tipo
+        if (original instanceof FloatBuffer b) return FloatBuffer.allocate(b.remaining()).put(b.duplicate()).flip();
+        if (original instanceof ShortBuffer b) return ShortBuffer.allocate(b.remaining()).put(b.duplicate()).flip();
+        if (original instanceof ByteBuffer b) return ByteBuffer.allocate(b.remaining()).order(b.order()).put(b.duplicate()).flip();
+        if (original instanceof IntBuffer b) return IntBuffer.allocate(b.remaining()).put(b.duplicate()).flip();
+        if (original instanceof DoubleBuffer b) return DoubleBuffer.allocate(b.remaining()).put(b.duplicate()).flip();
+        if (original instanceof LongBuffer b) return LongBuffer.allocate(b.remaining()).put(b.duplicate()).flip();
+        if (original instanceof CharBuffer b) return CharBuffer.allocate(b.remaining()).put(b.duplicate()).flip();
+        throw new IllegalArgumentException("Tipo de buffer no soportado: " + original.getClass());
     }
 
-    // Conversor robusto que maneja tanto Mono como Estéreo (Planares y Empaquetados) sin distorsión
-    public static byte[] convertirMuestrasABytesPCM(java.nio.Buffer[] buffers, int canales) {
+    // PCM de 16 bits little-endian, con todos los canales entrelazados.
+    public static byte[] convertirMuestrasABytesPCM(Buffer[] buffers, int canales) {
         if (buffers == null || buffers.length == 0) return new byte[0];
-
-        java.nio.Buffer bufferPrincipal = buffers[0];
-
-        // 1. Si el búfer es de tipo FloatBuffer (El formato más común que entrega FFmpeg)
-        if (bufferPrincipal instanceof java.nio.FloatBuffer) {
-            java.nio.FloatBuffer left = (java.nio.FloatBuffer) bufferPrincipal;
-            left.rewind();
-
-            // Si es estéreo y tenemos búferes separados para izquierdo y derecho (Planar)
-            if (canales == 2 && buffers.length >= 2 && buffers[1] instanceof java.nio.FloatBuffer) {
-                java.nio.FloatBuffer right = (java.nio.FloatBuffer) buffers[1];
-                right.rewind();
-
-                int length = Math.min(left.remaining(), right.remaining());
-                byte[] bytes = new byte[length * 4]; // length * 2 canales * 2 bytes por short
-                int idx = 0;
-
-                while (left.hasRemaining() && right.hasRemaining()) {
-                    // Limitar los valores flotantes estrictamente entre -1.0 y 1.0 para evitar clipping metálico
-                    float fL = Math.max(-1.0f, Math.min(1.0f, left.get()));
-                    float fR = Math.max(-1.0f, Math.min(1.0f, right.get()));
-
-                    short sL = (short) (fL * 32767.0f);
-                    short sR = (short) (fR * 32767.0f);
-
-                    // Entrelazar canales: Izquierdo (Low/High), Derecho (Low/High)
-                    bytes[idx++] = (byte) (sL & 0xff);
-                    bytes[idx++] = (byte) ((sL >> 8) & 0xff);
-                    bytes[idx++] = (byte) (sR & 0xff);
-                    bytes[idx++] = (byte) ((sR >> 8) & 0xff);
-                }
-                return bytes;
-            } else {
-                // Caso Mono en FloatBuffer
-                left.rewind();
-                byte[] bytes = new byte[left.remaining() * 2];
-                int idx = 0;
-                while (left.hasRemaining()) {
-                    float f = Math.max(-1.0f, Math.min(1.0f, left.get()));
-                    short s = (short) (f * 32767.0f);
-                    bytes[idx++] = (byte) (s & 0xff);
-                    bytes[idx++] = (byte) ((s >> 8) & 0xff);
-                }
-                return bytes;
+        if (canales <= 0 || (buffers.length != 1 && buffers.length != canales))
+            throw new IllegalArgumentException("Distribucion de canales no valida");
+        boolean planar = buffers.length > 1;
+        int muestras = buffers[0].remaining();
+        if (!planar && muestras % canales != 0)
+            throw new IllegalArgumentException("Bloque PCM incompleto");
+        if (planar) {
+            for (Buffer buffer : buffers) {
+                if (buffer.remaining() != muestras)
+                    throw new IllegalArgumentException("Canales con distinta cantidad de muestras");
             }
         }
-
-        // 2. Si el búfer ya viene como ShortBuffer directo
-        else if (bufferPrincipal instanceof java.nio.ShortBuffer) {
-            java.nio.ShortBuffer sb = (java.nio.ShortBuffer) bufferPrincipal;
-            sb.rewind();
-            byte[] bytes = new byte[sb.remaining() * 2];
-            int idx = 0;
-            while (sb.hasRemaining()) {
-                short s = sb.get();
-                bytes[idx++] = (byte) (s & 0xff);
-                bytes[idx++] = (byte) ((s >> 8) & 0xff);
+        int frames = planar ? muestras : muestras / canales;
+        int totalMuestras = Math.multiplyExact(frames, canales);
+        ByteBuffer pcm = ByteBuffer.allocate(Math.multiplyExact(totalMuestras, 2)).order(ByteOrder.LITTLE_ENDIAN);
+        for (int frame = 0; frame < frames; frame++) {
+            for (int canal = 0; canal < canales; canal++) {
+                Buffer buffer = buffers[planar ? canal : 0];
+                int indice = buffer.position() + (planar ? frame : frame * canales + canal);
+                pcm.putShort((short) leerMuestra(buffer, indice));
             }
-            return bytes;
         }
-
-        return new byte[0];
+        return pcm.array();
     }
 
+    private static int leerMuestra(Buffer buffer, int indice) {
+        if (buffer instanceof ShortBuffer b) return b.get(indice);
+        if (buffer instanceof ByteBuffer b) return ((b.get(indice) & 0xff) - 128) << 8;
+        if (buffer instanceof IntBuffer b) return b.get(indice) >> 16;
+        double valor;
+        if (buffer instanceof FloatBuffer b) valor = b.get(indice);
+        else if (buffer instanceof DoubleBuffer b) valor = b.get(indice);
+        else throw new IllegalArgumentException("Formato de muestra no soportado: " + buffer.getClass());
+        if (!Double.isFinite(valor)) valor = 0;
+        return (int) Math.max(-32768, Math.min(32767, Math.round(valor * 32768.0)));
+    }
 
-    // Estructuras añadidas para simular el procesamiento DSP pesado (Efecto Eco)
-    private static final Queue<float[]> historialEco = new LinkedList<>();
-    private static final int RETARDO_ECO = 5;
+    // Una instancia por reproduccion, utilizada exclusivamente por el hilo DSP.
+    // Retardo de 100 ms medido en frames de audio, independiente del tamano de bloque.
+    public static final class ProcesadorEco {
+        private short[] historial;
+        private int posicion;
+        private int canales;
+        private int frecuencia;
 
-    // Método que aplica el eco de forma síncrona y añade la trampa de CPU
-    public static void aplicarEfectoEcoSincrono(Buffer[] buffers, int canales) {
-        if (buffers == null || buffers.length == 0) return;
-
-        Buffer bufferPrincipal = buffers[0];
-
-        // 1. Si el búfer es FloatBuffer
-        if (bufferPrincipal instanceof FloatBuffer) {
-            FloatBuffer fb = (FloatBuffer) bufferPrincipal;
-            fb.rewind();
-            float[] muestras = new float[fb.remaining()];
-            fb.get(muestras);
-
-            historialEco.add(muestras.clone());
-            if (historialEco.size() > RETARDO_ECO) {
-                float[] muestrasAntiguas = historialEco.poll();
-                for (int i = 0; i < muestras.length && i < muestrasAntiguas.length; i++) {
-                    muestras[i] = (muestras[i] * 0.5f) + (muestrasAntiguas[i] * 0.5f);
-                }
+        public byte[] procesar(Buffer[] muestras, int canales, int frecuencia) {
+            if (canales <= 0 || frecuencia <= 0)
+                throw new IllegalArgumentException("Formato de audio no valido");
+            if (historial == null) {
+                this.canales = canales;
+                this.frecuencia = frecuencia;
+                historial = new short[Math.multiplyExact(Math.max(1, frecuencia / 10), canales)];
+            } else if (this.canales != canales || this.frecuencia != frecuencia) {
+                throw new IllegalArgumentException("El formato de audio cambio durante la reproduccion");
             }
-
-            fb.rewind();
-            fb.put(muestras);
-            fb.rewind();
-        }
-        // 2. Si el búfer es ShortBuffer (Muy común en varios formatos MP4)
-        else if (bufferPrincipal instanceof java.nio.ShortBuffer) {
-            java.nio.ShortBuffer sb = (java.nio.ShortBuffer) bufferPrincipal;
-            sb.rewind();
-            float[] muestras = new float[sb.remaining()];
-            for (int i = 0; i < muestras.length; i++) {
-                muestras[i] = sb.get() / 32767.0f; // Normalizar a flotante
-            }
-
-            historialEco.add(muestras.clone());
-            if (historialEco.size() > RETARDO_ECO) {
-                float[] muestrasAntiguas = historialEco.poll();
-                for (int i = 0; i < muestras.length && i < muestrasAntiguas.length; i++) {
-                    muestras[i] = (muestras[i] * 0.5f) + (muestrasAntiguas[i] * 0.5f);
-                }
-            }
-
-            sb.rewind();
-            for (float f : muestras) {
-                short s = (short) (Math.max(-1.0f, Math.min(1.0f, f)) * 32767.0f);
-                sb.put(s);
-            }
-            sb.rewind();
+            byte[] pcm = convertirMuestrasABytesPCM(muestras, canales);
+            aplicar(pcm);
+            return pcm;
         }
 
-        // ===================================================================
-        // TRAMPA PEDAGÓGICA: Forzar el Buffer Underflow
-        // ===================================================================
-
-        try {
-            // Carga artificial de CPU (cálculo pesado innecesario)
-            double dummy = 0;
-            for (int j = 0; j < 500000; j++) {
-                dummy += Math.sin(j);
+        private void aplicar(byte[] pcm) {
+            ShortBuffer muestras = ByteBuffer.wrap(pcm).order(ByteOrder.LITTLE_ENDIAN).asShortBuffer();
+            for (int i = 0; i < muestras.limit(); i++) {
+                short original = muestras.get(i);
+                short anterior = historial[posicion];
+                muestras.put(i, (short) ((original + anterior) / 2));
+                historial[posicion] = original;
+                posicion = (posicion + 1) % historial.length;
             }
-
-            // Pausa larga que excede el límite del buffer de la tarjeta de sonido
-            Thread.sleep(50); // Aumentado a 50ms para que la tarjeta de sonido muera de hambre
-        } catch (InterruptedException e) {
-            Thread.currentThread().interrupt();
         }
 
-
+        // Conserva la ultima repeticion del eco al llegar al fin del archivo.
+        public byte[] finalizar() {
+            if (historial == null) return new byte[0];
+            byte[] colaEco = new byte[historial.length * 2];
+            aplicar(colaEco);
+            return colaEco;
+        }
     }
 }
